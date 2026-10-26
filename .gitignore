@@ -12,6 +12,7 @@ xcuserdata/
 # 产物
 *.ipa
 Payload/
+_dl/
 
 # 其他
 *.moved-aside

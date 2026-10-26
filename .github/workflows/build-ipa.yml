@@ -9,6 +9,8 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -57,3 +59,16 @@ jobs:
           name: DailyLogGlass-ipa
           path: DailyLogGlass.ipa
           retention-days: 30
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: 最新构建 · DailyLog Glass
+          body: |
+            自动构建的未签名 IPA，下载后导入全能签签名安装。
+
+            提交：${{ github.sha }}
+          files: DailyLogGlass.ipa
+          make_latest: true
+          overwrite_files: true
