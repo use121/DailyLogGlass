@@ -12,10 +12,11 @@ struct TodayView: View {
     @State private var note: String = ""
     @State private var photoItem: PhotosPickerItem?
     @State private var photoData: Data?
-    @State private var justSaved: Bool = false
+
+    @State private var showPhotoPicker = false
+    @State private var justSaved = false
     @State private var hintMood: Mood?
-    @State private var showClearToast: Bool = false
-    @Namespace private var glassNS
+    @State private var toastText: String?
 
     private var todayEntry: Entry? {
         entries.first { Calendar.current.isDateInToday($0.date) }
@@ -29,6 +30,7 @@ struct TodayView: View {
                 photoCard
                 editorCard
                 saveButton
+                hintCaption
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
@@ -36,30 +38,31 @@ struct TodayView: View {
         }
         .scrollIndicators(.hidden)
         .onAppear(perform: loadToday)
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
         .onChange(of: photoItem) { _, newItem in
             guard let newItem else { return }
             Task {
                 guard let data = try? await newItem.loadTransferable(type: Data.self) else { return }
                 await MainActor.run {
-                    withAnimation(.spring(response: 0.35)) {
-                        photoData = data
-                    }
+                    withAnimation(.spring(response: 0.35)) { photoData = data }
                 }
             }
         }
         .overlay(alignment: .top) {
-            if let mood = hintMood {
-                hintBubble(mood)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+            VStack(spacing: 8) {
+                if let mood = hintMood {
+                    bubble(mood.hint, tint: mood.tint.opacity(0.35))
+                }
+                if let toastText {
+                    bubble(toastText, tint: .clear)
+                }
             }
-            if showClearToast {
-                toast("草稿已清空")
-                    .transition(.opacity)
-            }
+            .padding(.top, 8)
+            .allowsHitTesting(false)
         }
     }
 
-    // MARK: - 头部
+    // MARK: - 头部（只有长按，没有点击，不存在冲突）
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -78,72 +81,74 @@ struct TodayView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(22)
         .glassCard(cornerRadius: 28)
+        .contentShape(Rectangle())
         .onLongPressGesture(minimumDuration: 0.5) {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             copyTodayToClipboard()
         }
     }
 
-    // MARK: - 心情
+    // MARK: - 心情（点击与长按交给两套独立手势，不再用 Button）
 
     private var moodRow: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(spacing: 10) {
-                ForEach(Mood.all) { mood in
-                    Button {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
-                            moodIndex = mood.id
-                        }
-                    } label: {
-                        VStack(spacing: 6) {
-                            Text(mood.emoji)
-                                .font(.system(size: 24))
-                            Text(mood.label)
-                                .font(.system(size: 10, weight: .medium, design: .rounded))
-                                .foregroundStyle(moodIndex == mood.id ? .primary : .secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
+        HStack(spacing: 10) {
+            ForEach(Mood.all) { mood in
+                moodCell(mood)
+            }
+        }
+    }
+
+    private func moodCell(_ mood: Mood) -> some View {
+        let selected = moodIndex == mood.id
+
+        return VStack(spacing: 6) {
+            Text(mood.emoji)
+                .font(.system(size: 24))
+            Text(mood.label)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(selected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 13)
+        .contentShape(Rectangle())
+        .glassEffect(
+            .regular.tint(selected ? mood.tint.opacity(0.55) : Color.clear),
+            in: .rect(cornerRadius: 22)
+        )
+        .onTapGesture {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+                moodIndex = mood.id
+            }
+        }
+        .onLongPressGesture(minimumDuration: 0.45) {
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            withAnimation(.spring(response: 0.3)) { hintMood = mood }
+            Task {
+                try? await Task.sleep(for: .seconds(2.2))
+                await MainActor.run {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        if hintMood?.id == mood.id { hintMood = nil }
                     }
-                    .buttonStyle(.plain)
-                    .glassEffect(
-                        moodIndex == mood.id
-                            ? .regular.tint(mood.tint.opacity(0.55)).interactive()
-                            : .regular,
-                        in: .rect(cornerRadius: 22)
-                    )
-                    .glassEffectID(mood.id, in: glassNS)
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.45)
-                            .onEnded { _ in
-                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                withAnimation(.spring(response: 0.3)) {
-                                    hintMood = mood
-                                }
-                                Task {
-                                    try? await Task.sleep(for: .seconds(2.2))
-                                    await MainActor.run {
-                                        withAnimation(.easeOut(duration: 0.25)) {
-                                            if hintMood?.id == mood.id { hintMood = nil }
-                                        }
-                                    }
-                                }
-                            }
-                    )
                 }
             }
         }
     }
 
-    // MARK: - 照片
+    // MARK: - 照片（普通按钮 + 模态弹出，命中区域不会被撑开）
 
     private var photoCard: some View {
-        PhotosPicker(selection: $photoItem, matching: .images) {
-            ZStack {
+        Button {
+            showPhotoPicker = true
+        } label: {
+            Group {
                 if let photoData, let image = UIImage(data: photoData) {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
+                        .frame(maxWidth: .infinity)
                         .frame(height: 200)
+                        .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                         .overlay(alignment: .bottomTrailing) {
                             Text("更换")
@@ -166,11 +171,12 @@ struct TodayView: View {
                     .glassCard(cornerRadius: 24)
                 }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    // MARK: - 编辑
+    // MARK: - 编辑卡片（长按清空）
 
     private var editorCard: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -191,9 +197,13 @@ struct TodayView: View {
         }
         .padding(22)
         .glassCard(cornerRadius: 26)
+        .contentShape(Rectangle())
+        .onLongPressGesture(minimumDuration: 0.6) {
+            clearDraft()
+        }
     }
 
-    // MARK: - 保存
+    // MARK: - 保存（纯点击，不挂任何手势）
 
     private var saveButton: some View {
         Button {
@@ -212,47 +222,29 @@ struct TodayView: View {
         .foregroundStyle(justSaved ? Color.white : Color(uiColor: .systemBackground))
         .disabled(title.isEmpty && note.isEmpty && photoData == nil)
         .animation(.spring(response: 0.3), value: justSaved)
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.6)
-                .onEnded { _ in
-                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-                    withAnimation(.spring(response: 0.3)) {
-                        title = ""
-                        note = ""
-                        photoData = nil
-                        photoItem = nil
-                        showClearToast = true
-                    }
-                    Task {
-                        try? await Task.sleep(for: .seconds(1.6))
-                        await MainActor.run {
-                            withAnimation(.easeOut(duration: 0.25)) { showClearToast = false }
-                        }
-                    }
-                }
-        )
+    }
+
+    private var hintCaption: some View {
+        Text("长按心情看提示 · 长按头部复制 · 长按编辑区清空草稿")
+            .font(.system(size: 11, design: .rounded))
+            .foregroundStyle(.tertiary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 2)
     }
 
     // MARK: - 浮层
 
-    private func hintBubble(_ mood: Mood) -> some View {
-        Text(mood.hint)
+    private func bubble(_ text: String, tint: Color) -> some View {
+        Text(text)
             .font(.system(size: 13, design: .rounded))
             .foregroundStyle(.primary)
+            .multilineTextAlignment(.center)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .glassEffect(.regular.tint(mood.tint.opacity(0.35)), in: .capsule)
-            .padding(.top, 8)
-    }
-
-    private func toast(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 13, weight: .medium, design: .rounded))
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .glassEffect(.regular, in: .capsule)
-            .padding(.top, 8)
+            .glassEffect(.regular.tint(tint), in: .rect(cornerRadius: 16))
+            .padding(.horizontal, 24)
+            .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     // MARK: - 逻辑
@@ -285,36 +277,43 @@ struct TodayView: View {
         try? context.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
 
-        withAnimation(.spring(response: 0.3)) {
-            justSaved = true
-        }
+        withAnimation(.spring(response: 0.3)) { justSaved = true }
 
         Task {
             try? await Task.sleep(for: .seconds(1.6))
             await MainActor.run {
-                withAnimation(.easeOut(duration: 0.25)) {
-                    justSaved = false
-                }
+                withAnimation(.easeOut(duration: 0.25)) { justSaved = false }
             }
         }
     }
 
+    private func clearDraft() {
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+        withAnimation(.spring(response: 0.3)) {
+            title = ""
+            note = ""
+            photoData = nil
+            photoItem = nil
+        }
+        showToast("草稿已清空")
+    }
+
     private func copyTodayToClipboard() {
-        var parts: [String] = []
-        let day = Date.now.formatted(.dateTime.year().month().day())
-        parts.append(day)
+        var parts: [String] = [Date.now.formatted(.dateTime.year().month().day())]
         if !title.isEmpty { parts.append(title) }
         if !note.isEmpty { parts.append(note) }
         if parts.count == 1 { parts.append("（今天还没有记录）") }
 
         UIPasteboard.general.string = parts.joined(separator: "\n")
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        showToast("已复制到剪贴板")
+    }
 
-        withAnimation(.spring(response: 0.3)) { showClearToast = true }
+    private func showToast(_ text: String) {
+        withAnimation(.spring(response: 0.3)) { toastText = text }
         Task {
             try? await Task.sleep(for: .seconds(1.6))
             await MainActor.run {
-                withAnimation(.easeOut(duration: 0.25)) { showClearToast = false }
+                withAnimation(.easeOut(duration: 0.25)) { toastText = nil }
             }
         }
     }

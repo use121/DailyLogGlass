@@ -83,7 +83,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
-                        theme == mode ? .regular.interactive() : .regular,
+                        .regular.tint(theme == mode ? Color.primary.opacity(0.16) : Color.clear),
                         in: .rect(cornerRadius: 18)
                     )
                 }
